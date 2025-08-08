@@ -32,10 +32,6 @@ for word in words:
         continue
 
 
-# print(words[:20])
-# print(unique_words)?
-
-
 dataset = {}
 window_size = 2
 
