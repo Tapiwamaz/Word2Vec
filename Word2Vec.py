@@ -3,11 +3,15 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
+import time 
 
 file = open("./Books/HP1.txt","r")
 book = ""
-for i in range(10):
-    book += file.readline()
+for i in range(153):
+    if i >= 102:
+        book += file.readline()
+    else:   
+        file.readline()
 # print(book)
 words = book.lower()
 new_book =""
@@ -33,7 +37,7 @@ for word in words:
 
 
 dataset = {}
-window_size = 2
+window_size = 1
 
 for i in range(len(words)):
     central_word = words[i]
@@ -80,15 +84,18 @@ class Word2VecSkipGram(nn.Module):
         # Output embedding layer (context word prediction)
         self.output_embeddings = nn.Embedding(vocab_size, embedding_dim)
         
-    def forward(self, center_word, context_word):
+    def forward(self, center_word, target_words):
         # Get embeddings
         center_embed = self.input_embeddings(center_word)  # [batch_size, embedding_dim]
-        context_embed = self.output_embeddings(context_word)  # [batch_size, embedding_dim]
+        target_embed = self.output_embeddings(target_words)  # [batch_size, num_targets, embedding_dim]
         
-        # Calculate dot product (similarity score)
-        score = torch.sum(center_embed * context_embed, dim=1)  # [batch_size]
+        # Calculate dot product scores
+        # center_embed: [batch_size, embedding_dim] -> [batch_size, 1, embedding_dim]
+        # target_embed: [batch_size, num_targets, embedding_dim]
+        scores = torch.bmm(center_embed.unsqueeze(1), target_embed.transpose(1, 2))  # [batch_size, 1, num_targets]
+        scores = scores.squeeze(1)  # [batch_size, num_targets]
         
-        return score
+        return scores
 
 # Custom Dataset class for Word2Vec
 class Word2VecDataset(Dataset):
@@ -105,54 +112,61 @@ class Word2VecDataset(Dataset):
 # Hyperparameters
 vocab_size = len(unique_words)
 embedding_dim = 100  # Size of word embeddings
-learning_rate = 0.01
+learning_rate = 0.005
 batch_size = 64
-epochs = 10
+num_negative_samples = 1  # Number of negative samples per positive sample
 
 # Create model, dataset, and dataloader
 model = Word2VecSkipGram(vocab_size, embedding_dim)
 word2vec_dataset = Word2VecDataset(training_pairs)
 dataloader = DataLoader(word2vec_dataset, batch_size=batch_size, shuffle=True)
 
-# Loss function and optimizer
-criterion = nn.BCEWithLogitsLoss()  # Binary cross-entropy with logits
+
 optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
 print("Starting training...")
 
-# Training loop
-for epoch in range(epochs):
+
+epoch =0
+loss = float('inf')
+start_time = time.time()
+while loss > 0.5:
     total_loss = 0
+
     for batch_idx, (center_words, context_words) in enumerate(dataloader):
+        batch_size_actual = center_words.size(0)
         
-        # Forward pass - positive samples
-        positive_scores = model(center_words, context_words)
-        positive_labels = torch.ones_like(positive_scores)
-        
-        # Generate negative samples (random context words)
-        number_of_negative = torch.Size([32])
-        # print(context_words.shape)
-        negative_context = torch.randint(0, vocab_size, context_words.shape, dtype=torch.long)
-        # print(negative_context)
-        negative_scores = model(center_words, negative_context)
-        negative_labels = torch.zeros_like(negative_scores)
+        # Generate negative samples
+        negative_samples = torch.randint(0, vocab_size, (batch_size_actual, num_negative_samples), dtype=torch.long)
         
         # Combine positive and negative samples
-        all_scores = torch.cat([positive_scores, negative_scores])
-        all_labels = torch.cat([positive_labels, negative_labels])
+        # positive: [batch_size, 1], negative: [batch_size, num_negative_samples]
+        all_targets = torch.cat([context_words.unsqueeze(1), negative_samples], dim=1)  # [batch_size, 1 + num_negative_samples]
         
-        # Calculate loss
-        loss = criterion(all_scores, all_labels)
+        # Forward pass
+        scores = model(center_words, all_targets)  # [batch_size, 1 + num_negative_samples]
+        
+        # Apply log softmax for numerical stability
+        log_probs = torch.log_softmax(scores, dim=1)  # [batch_size, 1 + num_negative_samples]
+        
+        # The positive sample is always at index 0, so we want to maximize its probability
+        # Negative log likelihood: we want to minimize -log(P(positive))
+        loss_epoch = -log_probs[:, 0].mean()  # Take negative log prob of positive samples
         
         # Backward pass
         optimizer.zero_grad()
-        loss.backward()
+        loss_epoch.backward()
         optimizer.step()
         
-        total_loss += loss.item()
-    
-    avg_loss = total_loss / len(dataloader)
-    print(f"Epoch {epoch+1}/{epochs}, Average Loss: {avg_loss:.4f}")
+        total_loss += loss_epoch.item()
+        
+        
+    loss = total_loss / len(dataloader)
+
+    epoch +=1
+
+end_time = time.time()  # End timing
+total_training_time = end_time - start_time
 
 print("Training completed!")
 
@@ -177,12 +191,51 @@ for word in test_words:
     else:
         print(f"Word '{word}' not in vocabulary")
 
-# print(dataset["the"])
 
-mr = get_word_embedding("mr")
-mrs = get_word_embedding("mrs")
-# queen=  get_word_embedding("queen")
-# queens = get_word_embedding("queens")
-print(np.dot(mr,mrs))
-# print(np.dot(harry,potter))
+# ron = get_word_embedding("ron")
+# harry = get_word_embedding("harry")
+# # queen=  get_word_embedding("queen")
+# # queens = get_word_embedding("queens")
+# print(np.dot(ron,harry))
+# # hermione, ron, potter, magic, hogwarts, dumbledore
 
+
+word_pairs = [
+    # ("hermione", "ron"),
+    # ("harry", "potter"),
+    ("magic", "hogwarts"),
+    # ("ron", "harry"),
+    # ("dumbledore", "hogwarts"),
+    # ("hermione", "potter")
+]
+
+dot_products = {}
+
+for word1, word2 in word_pairs:
+    emb1 = get_word_embedding(word1)
+    emb2 = get_word_embedding(word2)
+    
+    if emb1 is not None and emb2 is not None:
+        dot_prod = np.dot(emb1, emb2)
+        dot_products[f"{word1}_{word2}"] = dot_prod
+
+
+# Save results to CSV with dot products
+file = open("Similarity vs Samples4.csv", "w+")
+file.write("Negative_Samples,Similarity\n")
+
+
+# for pair_name in dot_products.keys():
+#     file.write(f"{pair_name}, ")
+
+# file.write("\n")
+
+# Write the data
+file.write(f"{num_negative_samples}")
+
+# Add dot product values
+for dot_prod in dot_products.values():
+    file.write(f" ,{dot_prod:.4f}")
+
+file.write("\n")
+file.close()
